@@ -294,7 +294,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         function toggleLed(state) {
             if (!isServerConnected) return;
 
-            fetch(`/led/${state}`, { method: 'POST' })
+            fetch(/led/${state}, { method: 'POST' })
             .then(response => response.text())
             .catch(error => {
                 console.error('Error:', error);
@@ -308,13 +308,13 @@ const char index_html[] PROGMEM = R"rawliteral(
             .then(data => {
                 setServerStatus(true);
                 console.log(data)
-                document.getElementById('status').innerHTML = `
+                document.getElementById('status').innerHTML = 
                     <b>Uso de CPU:</b> ${data.cpuUsage}%<br>
                     <b>Espacio disponible:</b> ${data.availableSpace} bytes<br>
                     <b>Última vez que se encendió el LED:</b> ${data.lastLedOn}<br>
                     <b>Última vez que se apagó el LED:</b> ${data.lastLedOff}<br>
                     <b>Hora actual NTP:</b> ${data.ntpTime}
-                `;
+                ;
             })
             .catch(error => {
                 console.error('Error:', error);
@@ -325,7 +325,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         function setServerStatus(connected) {
             isServerConnected = connected;
             serverStatus.textContent = connected ? 'Servidor conectado' : 'Servidor desconectado';
-            serverStatus.className = `server-status ${connected ? 'connected' : 'disconnected'}`;
+            serverStatus.className = server-status ${connected ? 'connected' : 'disconnected'};
             
             // Habilitar o deshabilitar los interruptores y el LED virtual
             switch1.disabled = !connected;
