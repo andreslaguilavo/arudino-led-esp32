@@ -1,383 +1,423 @@
-#include <WiFi.h>
 #include <ESPAsyncWebServer.h>
-#include <SPIFFS.h>
+#include <AsyncTCP.h>
+#include <WebSocketsServer.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
-#include <ArduinoJson.h>
+#include <EEPROM.h>
 
 const char* ssid = "Galaxy andres";
 const char* password = "moqa0193";
-const int ledPin = 2;  // pin que se esta utilizando
+// Variables de simulación
+int cpuUsage = 30;
+int availableSpace = 5000;
+const int maxHistorialSize = 50;
+String historial[maxHistorialSize];
+int historialIndex = 0;
 
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);  // Sin ajuste de zona horaria aquí
+// Pines y WebSocket
+const int pin1 = 2;
+const int pin2 = 4;
+const int pin3 = 5;
+const int pin4 = 18;
+const int entryPin = 21;
+int lastStatePin21 = LOW;  // Variable para almacenar el estado anterior del pin
+unsigned long lastTimeSent = 0;
+const long interval = 10000;  // Intervalo de 10 segundos
+
 AsyncWebServer server(80);
-
-// Variables para almacenar el tiempo en que el LED fue encendido/apagado
-String lastLedOnTime;
-String lastLedOffTime;
-
-// Variables de simulación para CPU y espacio disponible
-int cpuUsage;
-int availableSpace;
+WebSocketsServer webSocket = WebSocketsServer(81);
 
 // Ajuste de zona horaria para Bogotá (UTC -5)
-const long utcOffsetInSeconds = -5 * 3600;  // UTC-5 sin horario de verano
+const long utcOffsetInSeconds = -5 * 3600;
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "time.nist.gov", utcOffsetInSeconds);
 
-// Función para obtener la hora ajustada a la zona horaria de Bogotá
+// Obtener la hora ajustada
 String getFormattedTime() {
-  unsigned long rawTime = timeClient.getEpochTime() + utcOffsetInSeconds;
+  timeClient.update();
+  unsigned long rawTime = timeClient.getEpochTime();  // No se necesita sumar utcOffsetInSeconds
   time_t adjustedTime = rawTime;
-  struct tm *timeinfo = localtime(&adjustedTime);
-  
-  char timeStringBuff[50];  // Buffer para almacenar la hora formateada
+  struct tm* timeinfo = localtime(&adjustedTime);
+
+  char timeStringBuff[50];
   strftime(timeStringBuff, sizeof(timeStringBuff), "%Y-%m-%d %H:%M:%S", timeinfo);
   return String(timeStringBuff);
 }
 
+
+// Función para guardar el historial en memoria
+void guardarHistorial(String evento) {
+  historial[historialIndex] = evento;
+  historialIndex = (historialIndex + 1) % maxHistorialSize;
+  EEPROM.put(historialIndex, evento);
+  EEPROM.commit();
+}
+
+// Función para enviar historial al cliente WebSocket
+void enviarHistorial(uint8_t num) {
+  String allEvents = "";
+  for (int i = 0; i < maxHistorialSize; i++) {
+    if (historial[i] != "") {
+      allEvents += historial[i] + "\n";  // Concatenar todos los eventos
+    }
+  }
+  if (allEvents != "") {
+    webSocket.sendTXT(num, allEvents);  // Enviar todos los eventos en un solo mensaje
+  }
+}
+
+// Función para manejar los estados de los pines
+void controlarPin(int pin, bool estado, const char* accion) {
+  digitalWrite(pin, estado ? HIGH : LOW);
+  String evento = String(accion) + " a las " + getFormattedTime();
+  Serial.println(evento);
+  guardarHistorial(evento);
+  String allEvents = "";
+  for (int i = 0; i < maxHistorialSize; i++) {
+    if (historial[i] != "") {
+      allEvents += historial[i] + "\n";  // Concatenar todo el historial
+    }
+  }
+  webSocket.broadcastTXT(allEvents);
+}
+
+// Manejador de WebSocket
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+  if (type == WStype_TEXT) {
+    String msg = String((char*)payload);
+
+    if (msg == "historial") {
+      enviarHistorial(num);
+    } else if (msg == "hora") {
+      String currentTime = getFormattedTime();
+      webSocket.sendTXT(num, currentTime);  // Enviar la hora al cliente
+    } else if (msg.startsWith("pin")) {
+      int pin = msg.charAt(3) - '0';
+      bool estado = msg.endsWith("on");
+
+      switch (pin) {
+        case 1: controlarPin(pin1, estado, estado ? "Encendida entrada 1" : "Apagada entrada 1"); break;
+        case 2: controlarPin(pin2, estado, estado ? "Encendida entrada 2" : "Apagada entrada 2"); break;
+        case 3: controlarPin(pin3, estado, estado ? "Encendida entrada 3" : "Apagada entrada 3"); break;
+        case 4: controlarPin(pin4, estado, estado ? "Encendida entrada 4" : "Apagada entrada 4"); break;
+      }
+    }
+  }
+}
+
+
+
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Simulador de Compuertas Lógicas con LED Físico</title>
     <style>
-        *{
-            box-sizing: border-box;
-        }
-        body {
-            font-family: Arial, sans-serif;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            background-color: #f0f0f0;
-            margin: 0;
-            padding: 20px;
-        }
-        h1, h2 {
-            color: #333;
-            text-align: center;
-        }
-        .container {
-            background-color: white;
-            border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-            width: 100%;
-            max-width: 600px;
-        }
-        .controls {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: space-around;
-            align-items: center;
-            margin-bottom: 20px;
-        }
-        .switch-container {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            margin: 10px 0;
-        }
-        .switch {
-            width: 60px;
-            height: 34px;
-            position: relative;
-            display: inline-block;
-        }
-        .switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-        .slider {
-            position: absolute;
-            cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: #ccc;
-            transition: .4s;
-            border-radius: 34px;
-        }
-        .slider:before {
-            position: absolute;
-            content: "";
-            height: 26px;
-            width: 26px;
-            left: 4px;
-            bottom: 4px;
-            background-color: white;
-            transition: .4s;
-            border-radius: 50%;
-        }
-        input:checked + .slider {
-            background-color: #2196F3;
-        }
-        input:checked + .slider:before {
-            transform: translateX(26px);
-        }
-        .led {
-            width: 50px;
-            height: 50px;
-            border-radius: 50%;
-            background-color: #ccc;
-            margin: 20px auto;
-        }
-        .led.on {
-            background-color: #00ff00;
-            box-shadow: 0 0 20px #00ff00;
-        }
-        .gate-buttons {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: 10px;
-            margin-top: 10px;
-        }
-        .gate-button {
-            padding: 10px 15px;
-            background-color: #f0f0f0;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            transition: background-color 0.3s;
-        }
-        .gate-button.selected {
-            background-color: #2196F3;
-            color: white;
-        }
-        .physical-led-controls {
-            display: flex;
-            justify-content: center;
-            gap: 10px;
-            margin-top: 20px;
-        }
-        .status-container {
-            margin-top: 20px;
-            padding: 10px;
-            background-color: #f0f0f0;
-            border-radius: 5px;
-        }
-        .server-status {
-            text-align: center;
-            font-weight: bold;
-            margin-top: 10px;
-            padding: 10px;
-            border-radius: 5px;
-        }
-        .server-status.connected {
-            background-color: #d4edda;
-            color: #155724;
-        }
-        .server-status.disconnected {
-            background-color: #f8d7da;
-            color: #721c24;
-        }
-        #status{
-          text-align: center;
-        }
-        footer {
-            margin-top: 20px;
-            text-align: center;
-            color: #666;
-        }
-        .disabled-element {
-            cursor: not-allowed;
-        }
-        .disabled-element * {
-            pointer-events: none;
-        }
+      /* Estilos mantenidos igual que en el código original */
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family: Arial, sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        background-color: #f0f0f0;
+        margin: 0;
+        padding: 20px;
+      }
+      h1,
+      h2 {
+        color: #333;
+        text-align: center;
+      }
+      .container {
+        background-color: white;
+        border-radius: 8px;
+        padding: 20px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        margin-bottom: 20px;
+        width: 100%;
+        max-width: 600px;
+      }
+      .controls {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        flex-wrap: wrap;
+        justify-content: space-around;
+        margin-bottom: 20px;
+      }
+      .switch-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        margin: 10px 0;
+      }
+      .switch {
+        width: 60px;
+        height: 34px;
+        position: relative;
+        display: inline-block;
+      }
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: #ccc;
+        transition: 0.4s;
+        border-radius: 34px;
+      }
+      .slider:before {
+        position: absolute;
+        content: '';
+        height: 26px;
+        width: 26px;
+        left: 4px;
+        bottom: 4px;
+        background-color: white;
+        transition: 0.4s;
+        border-radius: 50%;
+      }
+      input:checked + .slider {
+        background-color: #2196f3;
+      }
+      input:checked + .slider:before {
+        transform: translateX(26px);
+      }
+      .led {
+        width: 50px;
+        height: 50px;
+        border-radius: 50%;
+        background-color: #ccc;
+        margin: 20px auto;
+      }
+      .led.on {
+        background-color: #00ff00;
+        box-shadow: 0 0 20px #00ff00;
+      }
+      .physical-led-controls {
+        display: flex;
+        justify-content: center;
+        gap: 10px;
+        margin-top: 20px;
+      }
+      .status-container {
+        margin-top: 20px;
+        padding: 10px;
+        background-color: #f0f0f0;
+        border-radius: 5px;
+      }
+      .server-status {
+        text-align: center;
+        font-weight: bold;
+        margin-top: 10px;
+        padding: 10px;
+        border-radius: 5px;
+      }
+      .server-status.connected {
+        background-color: #d4edda;
+        color: #155724;
+      }
+      .server-status.disconnected {
+        background-color: #f8d7da;
+        color: #721c24;
+      }
+      #status {
+        text-align: center;
+      }
+      footer {
+        margin-top: 20px;
+        text-align: center;
+        color: #666;
+      }
+      .disabled-element {
+        cursor: not-allowed;
+      }
+      .disabled-element * {
+        pointer-events: none;
+      }
+      .hora {
+        text-align: center;
+        font-weight: bold;
+        font-size: larger;
+      }
     </style>
-</head>
-<body>
+  </head>
+  <body>
     <div class="container">
-        <h1>Simulador de Compuertas Lógicas con LED Físico</h1>
-        <div id="serverStatus" class="server-status disconnected">
-            Verificando conexión con el servidor...
+      <h1>Simulador de Compuertas Lógicas con LED Físico</h1>
+      <div id="serverStatus" class="server-status disconnected">
+        Verificando conexión con el servidor...
+      </div>
+      <div class="controls">
+        <div class="switch-container">
+          <h2>S1 / A</h2>
+          <label class="switch">
+            <input type="checkbox" id="switch1" />
+            <span class="slider"></span>
+          </label>
         </div>
-        <div class="controls">
-            <div class="switch-container">
-                <h2>Interruptor 1</h2>
-                <label class="switch">
-                    <input type="checkbox" id="switch1">
-                    <span class="slider"></span>
-                </label>
-            </div>
-            <div class="switch-container">
-                <h2>Interruptor 2</h2>
-                <label class="switch">
-                    <input type="checkbox" id="switch2">
-                    <span class="slider"></span>
-                </label>
-            </div>
+        <div class="switch-container">
+          <h2>S2 / B</h2>
+          <label class="switch">
+            <input type="checkbox" id="switch2" />
+            <span class="slider"></span>
+          </label>
         </div>
-        <div>
-            <h2>Compuerta Lógica</h2>
-            <div class="gate-buttons">
-                <button class="gate-button selected" data-gate="AND">AND</button>
-                <button class="gate-button" data-gate="OR">OR</button>
-                <button class="gate-button" data-gate="XOR">XOR</button>
-                <button class="gate-button" data-gate="XNOR">XNOR</button>
-                <button class="gate-button" data-gate="NAND">NAND</button>
-                <button class="gate-button" data-gate="NOR">NOR</button>
-            </div>
+        <div class="switch-container">
+          <h2>S3 / C</h2>
+          <label class="switch">
+            <input type="checkbox" id="switch3" />
+            <span class="slider"></span>
+          </label>
         </div>
-        <div>
-            <h2>Resultado Virtual</h2>
-            <div id="led" class="led"></div>
+        <div class="switch-container">
+          <h2>S4 / D</h2>
+          <label class="switch">
+            <input type="checkbox" id="switch4" />
+            <span class="slider"></span>
+          </label>
         </div>
-        <div class="status-container">
-            <h2>Estado del Sistema</h2>
-            <div id="status"></div>
-        </div>
+      </div>
+      <div>
+        <h2>Resultado</h2>
+        <div id="led" class="led"></div>
+      </div>
+      <div id="horaContainer">
+        <h2>Hora actual:</h2>
+        <p id="horaActual" class="hora"></p>
+      </div>
+      <div id="historialContainer">
+        <h2>Historial de Eventos</h2>
+        <ul id="historialList"></ul>
+      </div>
     </div>
     <footer>
-        <p>Universidad: Politécnico Grancolombiano</p>
-        <p>Integrantes: Andrés Laguilavo y Dayana Calderón</p>
+      <p>Universidad: Politécnico Grancolombiano</p>
+      <p>Integrantes: Andrés Laguilavo y Dayana Calderón</p>
     </footer>
 
     <script>
-        const switch1 = document.getElementById('switch1');
-        const switch2 = document.getElementById('switch2');
-        const led = document.getElementById('led');
-        const gateButtons = document.querySelectorAll('.gate-button');
-        const serverStatus = document.getElementById('serverStatus');
-        let selectedGate = 'AND';
-        let isServerConnected = false;
+      let socket
+      const switch1 = document.getElementById('switch1')
+      const switch2 = document.getElementById('switch2')
+      const switch3 = document.getElementById('switch3')
+      const switch4 = document.getElementById('switch4')
+      const serverStatus = document.getElementById('serverStatus')
+      const led = document.getElementById('led')
+      const historialList = document.getElementById('historialList')
 
-        function updateLED() {
-            if (!isServerConnected) return;
+      // Función para inicializar WebSocket
+      function initWebSocket() {
+        
+        socket = new WebSocket('ws://' + window.location.hostname + ':81/');
 
-            const input1 = switch1.checked;
-            const input2 = switch2.checked;
-            let output;
+        socket.onopen = function () {
+          console.log('Conectado al servidor')
+          serverStatus.textContent = 'Conectado al servidor'
+          serverStatus.classList.remove('disconnected')
+          serverStatus.classList.add('connected')
 
-            switch(selectedGate) {
-                case 'AND':
-                    output = input1 && input2;
-                    break;
-                case 'OR':
-                    output = input1 || input2;
-                    break;
-                case 'XOR':
-                    output = input1 !== input2;
-                    break;
-                case 'XNOR':
-                    output = input1 === input2;
-                    break;
-                case 'NAND':
-                    output = !(input1 && input2);
-                    break;
-                case 'NOR':
-                    output = !(input1 || input2);
-                    break;
-            }
-
-            led.classList.toggle('on', output);
-            toggleLed(output ? 'on' : 'off');
+          // Solicitar historial y la hora cuando se conecta
+          // socket.send('hora')
+          socket.send('historial')
         }
 
-        function selectGate(gate) {
-            if (selectedGate !== gate) {
-                selectedGate = gate;
-                gateButtons.forEach(btn => {
-                    btn.classList.toggle('selected', btn.dataset.gate === gate);
-                });
-                updateLED();
-            }
+        socket.onclose = function () {
+          serverStatus.textContent = 'Desconectado del servidor'
+          serverStatus.classList.remove('connected')
+          serverStatus.classList.add('disconnected')
+          setTimeout(initWebSocket, 2000) // Intentar reconectar
         }
 
-        function toggleLed(state) {
-            if (!isServerConnected) return;
-
-            fetch(/led/${state}, { method: 'POST' })
-            .then(response => response.text())
-            .catch(error => {
-                console.error('Error:', error);
-                setServerStatus(false);
-            });
+        socket.onmessage = function (event) {
+          const data = event.data
+          console.log('Evento:', data)
+          if (data === 'HIGH') {
+            led.classList.add('on')
+          } else if (data === 'LOW') {
+            led.classList.remove('on')
+          } else if (
+            data.startsWith('Encendida') ||
+            data.startsWith('Apagada')
+          ) {
+            mostrarHistorial(data)
+          } else {
+            document.getElementById('horaActual').textContent = data
+          }
         }
+      }
 
-        function getStatus() {
-            fetch('/status')
-            .then(response => response.json())
-            .then(data => {
-                setServerStatus(true);
-                console.log(data)
-                document.getElementById('status').innerHTML = 
-                    <b>Uso de CPU:</b> ${data.cpuUsage}%<br>
-                    <b>Espacio disponible:</b> ${data.availableSpace} bytes<br>
-                    <b>Última vez que se encendió el LED:</b> ${data.lastLedOn}<br>
-                    <b>Última vez que se apagó el LED:</b> ${data.lastLedOff}<br>
-                    <b>Hora actual NTP:</b> ${data.ntpTime}
-                ;
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                setServerStatus(false);
-            });
+      function mostrarHistorial(data) {
+        const eventos = data.split('\n')
+        historialList.innerHTML = '' // Limpiar lista actual
+        eventos.reverse().forEach((evento) => {
+          if (evento.trim() !== '') {
+            const listItem = document.createElement('li')
+            listItem.textContent = evento
+            historialList.appendChild(listItem)
+          }
+        })
+      }
+
+      switch1.addEventListener('change', () =>
+        togglePin(1, switch1.checked ? 'on' : 'off')
+      )
+      switch2.addEventListener('change', () =>
+        togglePin(2, switch2.checked ? 'on' : 'off')
+      )
+      switch3.addEventListener('change', () =>
+        togglePin(3, switch3.checked ? 'on' : 'off')
+      )
+      switch4.addEventListener('change', () =>
+        togglePin(4, switch4.checked ? 'on' : 'off')
+      )
+
+      function togglePin(pin, action) {
+        const message = `pin${pin}/${action}`
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(message)
+        } else {
+          console.error('WebSocket no está conectado.')
         }
+      }
 
-        function setServerStatus(connected) {
-            isServerConnected = connected;
-            serverStatus.textContent = connected ? 'Servidor conectado' : 'Servidor desconectado';
-            serverStatus.className = server-status ${connected ? 'connected' : 'disconnected'};
-            
-            // Habilitar o deshabilitar los interruptores y el LED virtual
-            switch1.disabled = !connected;
-            switch2.disabled = !connected;
-            led.style.opacity = connected ? '1' : '0.5';
-            
-            // Habilitar o deshabilitar los botones de compuertas lógicas
-            gateButtons.forEach(btn => {
-                btn.disabled = !connected;
-                btn.classList.toggle('disabled-element', !connected);
-            });
-            
-            // Añadir o quitar la clase 'disabled-element' a los contenedores de los switches
-            document.querySelectorAll('.switch-container').forEach(container => {
-                container.classList.toggle('disabled-element', !connected);
-            });
-            
-            // Actualizar el estado del LED si el servidor está conectado
-            if (connected) {
-                updateLED();
-            } else {
-                document.getElementById('status').innerHTML = 'No hay información disponible';
-            }
-        }
+      // Iniciar WebSocket al cargar la página
 
-        function initializeServerConnection() {
-            getStatus();
-        }
-
-        switch1.addEventListener('change', updateLED);
-        switch2.addEventListener('change', updateLED);
-
-        gateButtons.forEach(button => {
-            button.addEventListener('click', () => selectGate(button.dataset.gate));
-        });
-
-        // Inicializar la conexión del servidor al cargar la página
-        initializeServerConnection();
-
-        // Actualizar el estado cada segundo después de la inicialización
-        setInterval(getStatus, 1000);
+      window.onload = function () {
+        // console.log('Iniciando WebSocket...');
+        initWebSocket()
+      }
     </script>
-</body>
+  </body>
 </html>
-)rawliteral";
 
+
+
+)rawliteral";
 
 void setup() {
   Serial.begin(115200);
-  pinMode(ledPin, OUTPUT);
+  EEPROM.begin(512);  // Inicializamos EEPROM
 
-  // Conexión a la red WiFi
+  // Configuración de los pines
+  pinMode(pin1, OUTPUT);
+  pinMode(pin2, OUTPUT);
+  pinMode(pin3, OUTPUT);
+  pinMode(pin4, OUTPUT);
+  pinMode(entryPin, INPUT);  // Configurar el pin 21 como entrada
+
+  // Conexión a WiFi
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
@@ -385,54 +425,38 @@ void setup() {
   }
   Serial.println("Conectado a WiFi");
   Serial.println(WiFi.localIP());
-  // Inicializar el cliente NTP
+
+  // Iniciar el servidor WebSocket
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
+
+  // Iniciar el servidor NTP
   timeClient.begin();
+  
 
-  // Inicializar SPIFFS
-  if (!SPIFFS.begin(true)) {
-    Serial.println("Error al montar SPIFFS");
-    return;
-  }
-
-
-  // Rutas del servidor
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/html", index_html);
-  });
-
-  server.on("/led/on", HTTP_POST, [](AsyncWebServerRequest *request){
-    digitalWrite(ledPin, HIGH);
-    lastLedOnTime = getFormattedTime();
-    request->send(200, "text/plain", "LED Encendido");
-  });
-
-  server.on("/led/off", HTTP_POST, [](AsyncWebServerRequest *request){
-    digitalWrite(ledPin, LOW);
-    lastLedOffTime = getFormattedTime();
-    request->send(200, "text/plain", "LED Apagado");
-  });
-
-  server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
-    StaticJsonDocument<200> json;
-    json["cpuUsage"] = cpuUsage;
-    json["availableSpace"] = availableSpace;
-    json["lastLedOn"] = lastLedOnTime;
-    json["lastLedOff"] = lastLedOffTime;
-    json["ntpTime"] = getFormattedTime();
-    
-    String jsonString;
-    serializeJson(json, jsonString);
-    request->send(200, "application/json", jsonString);
+  // Configurar rutas del servidor web
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send_P(200, "text/html", index_html);  // Tu HTML aquí
   });
 
   server.begin();
 }
 
 void loop() {
-  // Actualiza la hora desde el servidor NTP
-  timeClient.update();
+  webSocket.loop();     // Mantener WebSocket activo
+  timeClient.update();  // Actualizar la hora NTP
 
-  // Simulación de uso de CPU y espacio disponible
-  cpuUsage = random(0, 100);  // Ejemplo de uso de CPU
-  availableSpace = SPIFFS.totalBytes() - SPIFFS.usedBytes();
+  if (millis() - lastTimeSent > interval) {
+    lastTimeSent = millis();
+    String currentTime = getFormattedTime();
+    webSocket.broadcastTXT(currentTime);  // Enviar hora por WebSocket
+  }
+  int currentStatePin21 = digitalRead(entryPin);
+
+  if (currentStatePin21 != lastStatePin21) {  // Si el estado cambió
+    lastStatePin21 = currentStatePin21;       // Actualizar el estado anterior
+    String mensaje = (currentStatePin21 == HIGH) ? "HIGH" : "LOW";
+    webSocket.broadcastTXT(mensaje);  // Enviar mensaje a todos los clientes conectados
+    Serial.println(mensaje);          // Mostrar en la consola para depuración
+  }
 }
