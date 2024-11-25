@@ -1,3 +1,4 @@
+#include <HTTPClient.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
 #include <WebSocketsServer.h>
@@ -23,6 +24,10 @@ const int entryPin = 21;
 int lastStatePin21 = LOW;  // Variable para almacenar el estado anterior del pin
 unsigned long lastTimeSent = 0;
 const long interval = 10000;  // Intervalo de 10 segundos
+
+//Google sheet
+const char* serverName = "https://script.google.com/macros/s/AKfycbwzuO5VG14rzrk3BmGbTEPy48zmI3rpUUi_DnBS3dmJLm3WhfTnyxVxzAnhvfDA3IMu/exec";
+
 
 AsyncWebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
@@ -65,12 +70,43 @@ void enviarHistorial(uint8_t num) {
     webSocket.sendTXT(num, allEvents);  // Enviar todos los eventos en un solo mensaje
   }
 }
+// Funcion para enviar los datos a google Sheets
+void sendToGoogleSheet(String accion, String time) {
+  String estadoLed = digitalRead(entryPin) ? "Encendida" : "Apagado";
+  int separador = accion.indexOf(" ");
+  String estadoSwitch = accion.substring(0, separador);
+  String entrada = accion.substring(separador + 1);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverName);
+    http.addHeader("Content-Type", "application/json");
+    Serial.println();
+    String jsonData = "{\"switchChange\":\"" + entrada + "\", \"ledStatus\":\"" + estadoLed + "\", \"switchStatus\":\"" + estadoSwitch + "\", \"time\":\"" + time + "\"}";
+
+    int httpResponseCode = http.POST(jsonData);
+
+    if (httpResponseCode > 0) {
+      String response = http.getString();
+      Serial.println(httpResponseCode);
+      Serial.println(response);
+    } else {
+      Serial.print("Wrong request POST: ");
+      Serial.println(httpResponseCode);
+    }
+
+    http.end();
+  }
+}
 
 // Función para manejar los estados de los pines
 void controlarPin(int pin, bool estado, const char* accion) {
+  Serial.print(estado);
   digitalWrite(pin, estado ? HIGH : LOW);
-  String evento = String(accion) + " a las " + getFormattedTime();
-  Serial.println(evento);
+
+  const String time = getFormattedTime();
+  String evento = String(accion) + " a las " + time;
+
   guardarHistorial(evento);
   String allEvents = "";
   for (int i = 0; i < maxHistorialSize; i++) {
@@ -79,6 +115,7 @@ void controlarPin(int pin, bool estado, const char* accion) {
     }
   }
   webSocket.broadcastTXT(allEvents);
+  sendToGoogleSheet(String(accion), time);
 }
 
 // Manejador de WebSocket
@@ -96,10 +133,10 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       bool estado = msg.endsWith("on");
 
       switch (pin) {
-        case 1: controlarPin(pin1, estado, estado ? "Encendida entrada 1" : "Apagada entrada 1"); break;
-        case 2: controlarPin(pin2, estado, estado ? "Encendida entrada 2" : "Apagada entrada 2"); break;
-        case 3: controlarPin(pin3, estado, estado ? "Encendida entrada 3" : "Apagada entrada 3"); break;
-        case 4: controlarPin(pin4, estado, estado ? "Encendida entrada 4" : "Apagada entrada 4"); break;
+        case 1: controlarPin(pin1, estado, estado ? "Activa entrada 1" : "Desactivada entrada 1"); break;
+        case 2: controlarPin(pin2, estado, estado ? "Activa entrada 2" : "Desactivada entrada 2"); break;
+        case 3: controlarPin(pin3, estado, estado ? "Activa entrada 3" : "Desactivada entrada 3"); break;
+        case 4: controlarPin(pin4, estado, estado ? "Activa entrada 4" : "Desactivada entrada 4"); break;
       }
     }
   }
@@ -348,8 +385,8 @@ const char index_html[] PROGMEM = R"rawliteral(
           } else if (data === 'LOW') {
             led.classList.remove('on')
           } else if (
-            data.startsWith('Encendida') ||
-            data.startsWith('Apagada')
+            data.startsWith('Activa') ||
+            data.startsWith('Desactivada')
           ) {
             mostrarHistorial(data)
           } else {
