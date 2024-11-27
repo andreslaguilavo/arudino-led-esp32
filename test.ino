@@ -71,18 +71,29 @@ void enviarHistorial(uint8_t num) {
   }
 }
 // Funcion para enviar los datos a google Sheets
-void sendToGoogleSheet(String accion, String time) {
+void sendToGoogleSheet() {
+  const String time = getFormattedTime();
   String estadoLed = digitalRead(entryPin) ? "Encendida" : "Apagado";
-  int separador = accion.indexOf(" ");
-  String estadoSwitch = accion.substring(0, separador);
-  String entrada = accion.substring(separador + 1);
 
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     http.begin(serverName);
     http.addHeader("Content-Type", "application/json");
-    Serial.println();
-    String jsonData = "{\"switchChange\":\"" + entrada + "\", \"ledStatus\":\"" + estadoLed + "\", \"switchStatus\":\"" + estadoSwitch + "\", \"time\":\"" + time + "\"}";
+    int valuePin1 = digitalRead(pin1);
+    int valuePin2 = digitalRead(pin2);
+    int valuePin3 = digitalRead(pin3);
+    int valuePin4 = digitalRead(pin4);
+
+    String jsonData = "{";
+    jsonData += "\"pins\": [";
+    jsonData += String(valuePin1) + ",";
+    jsonData += String(valuePin2) + ",";
+    jsonData += String(valuePin3) + ",";
+    jsonData += String(valuePin4);
+    jsonData += "],";
+    jsonData += "\"ledStatus\": \"" + estadoLed + "\",";
+    jsonData += "\"time\": \"" + time + "\"";
+    jsonData += "}";
 
     int httpResponseCode = http.POST(jsonData);
 
@@ -115,7 +126,6 @@ void controlarPin(int pin, bool estado, const char* accion) {
     }
   }
   webSocket.broadcastTXT(allEvents);
-  sendToGoogleSheet(String(accion), time);
 }
 
 // Manejador de WebSocket
@@ -469,7 +479,7 @@ void setup() {
 
   // Iniciar el servidor NTP
   timeClient.begin();
-  
+
 
   // Configurar rutas del servidor web
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -478,6 +488,11 @@ void setup() {
 
   server.begin();
 }
+
+int lastStatePin1 = 0;
+int lastStatePin2 = 0;
+int lastStatePin3 = 0;
+int lastStatePin4 = 0;
 
 void loop() {
   webSocket.loop();     // Mantener WebSocket activo
@@ -488,12 +503,45 @@ void loop() {
     String currentTime = getFormattedTime();
     webSocket.broadcastTXT(currentTime);  // Enviar hora por WebSocket
   }
+
   int currentStatePin21 = digitalRead(entryPin);
 
-  if (currentStatePin21 != lastStatePin21) {  // Si el estado cambió
-    lastStatePin21 = currentStatePin21;       // Actualizar el estado anterior
+  // Flag para saber si ya se envió a Google Sheets en este ciclo
+  bool hasSentToGoogleSheet = false;
+
+  // Validar cambios en los pines 1, 2, 3, y 4
+  if (lastStatePin1 != digitalRead(pin1) || 
+      lastStatePin2 != digitalRead(pin2) || 
+      lastStatePin3 != digitalRead(pin3) || 
+      lastStatePin4 != digitalRead(pin4)) {
+    
+    // Actualizar estados previos
+    lastStatePin1 = digitalRead(pin1);
+    lastStatePin2 = digitalRead(pin2);
+    lastStatePin3 = digitalRead(pin3);
+    lastStatePin4 = digitalRead(pin4);
+    
+    // Enviar datos a Google Sheets si no se ha enviado ya
+    if (!hasSentToGoogleSheet) {
+      sendToGoogleSheet();
+      hasSentToGoogleSheet = true;
+    }
+  }
+
+  // Validar cambios en el switch (entryPin)
+  if (currentStatePin21 != lastStatePin21) {
+    Serial.println(currentStatePin21); 
+    lastStatePin21 = currentStatePin21;  // Actualizar estado previo
     String mensaje = (currentStatePin21 == HIGH) ? "HIGH" : "LOW";
-    webSocket.broadcastTXT(mensaje);  // Enviar mensaje a todos los clientes conectados
-    Serial.println(mensaje);          // Mostrar en la consola para depuración
+    
+    // Enviar mensaje por WebSocket
+    webSocket.broadcastTXT(mensaje);  
+    Serial.println(mensaje);          // Mostrar en consola para depuración
+    
+    // Enviar datos a Google Sheets si no se ha enviado ya
+    if (!hasSentToGoogleSheet) {
+      sendToGoogleSheet();
+      hasSentToGoogleSheet = true;
+    }
   }
 }
